@@ -4,8 +4,8 @@
   "description": "",
   "main": "dist/main.js",
   "scripts": {
-    "start": "node --env-file=.env dist/main.js",
-    "dev": "tsx watch --env-file=.env src/main.ts",
+    "start": "node --env-file=../../.env dist/main.js",
+    "dev": "tsx watch --env-file=../../.env src/main.ts",
     "build": "tsc"
   },
   "keywords": [],
