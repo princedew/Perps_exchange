@@ -37,8 +37,10 @@ export class OrderBook {
 
     if (data.side === "BUY") {
       that.buyOrders.push(data);
+      return { orderId: data.orderId };
     } else {
       that.sellOrders.push(data);
+      return { orderId: data.orderId };
     }
   }
 
@@ -139,15 +141,20 @@ export class OrderBook {
   }
 
   getDepth() {
-    const depthMap = new Map<LimitPrice, CumulativeQuantity>();
     const that = this;
+    const buyDepthMap = new Map<LimitPrice, CumulativeQuantity>();
+    const sellDepthMap = new Map<LimitPrice, CumulativeQuantity>();
     that.buyOrders.forEach((order) => {
-        const cumulativeQty:number = depthMap.get(order.limitPrice) || 0;
-        depthMap.set(order.limitPrice, cumulativeQty + order.qty);
+      const cumulativeQty: number = buyDepthMap.get(order.limitPrice) || 0;
+      buyDepthMap.set(order.limitPrice, cumulativeQty + order.qty);
     });
     that.sellOrders.forEach((order) => {
-        const cumulativeQty:number = depthMap.get(order.limitPrice) || 0;
-        depthMap.set(order.limitPrice, cumulativeQty + order.qty);
+      const cumulativeQty: number = sellDepthMap.get(order.limitPrice) || 0;
+      sellDepthMap.set(order.limitPrice, cumulativeQty + order.qty);
     });
+    return {
+      buyDepth: Object.fromEntries(buyDepthMap),
+      sellDepth: Object.fromEntries(sellDepthMap),
+    };
   }
 }
