@@ -18,31 +18,81 @@ type SellOrders = {
   stopLoss: number;
 };
 
+type Order = {
+  orderId: number;
+  side: "BUY" | "SELL";
+  qty: number;
+  limitPrice: number;
+  takeProfit: number;
+  stopLoss: number;
+};
+
 type FilledOrder = BuyOrders | SellOrders;
 
 type LimitPrice = number;
 type CumulativeQuantity = number;
+type AccId = number;
 
 export class OrderBook {
+  market: string;
   buyOrders: BuyOrders[];
   sellOrders: SellOrders[];
-  market: string;
+  accounts: Map<AccId, { balance: number; orders: Order[] }>;
+
   constructor(market: string) {
     this.market = market;
     this.buyOrders = [];
     this.sellOrders = [];
+    this.accounts = new Map<AccId, { balance: number; orders: Order[] }>();
+  }
+
+  addBalance(data: { accId: number; balance: number }) {
+    const that = this;
+    const account = that.accounts.get(data.accId) || { balance: 0, orders: [] };
+    account.balance += data.balance;
+    that.accounts.set(data.accId, account);
+    return data;
+  }
+
+  hasMargin(data: BuyOrders | SellOrders) {
+    const that = this;
+    const requiredMargin = data.qty * data.limitPrice;
+    const account = that.accounts.get(data.accId);
+    if (!account) {
+      return { success: false, message: "Account not found." };
+    }
+    if (account.balance < requiredMargin) {
+      return { success: false, message: "Insufficiant Balance" };
+    }
+    return { success: true };
   }
 
   addOrder(data: BuyOrders | SellOrders) {
     const that = this;
 
+    const hasMargin = that.hasMargin(data);
+    if (!hasMargin.success) {
+      return hasMargin;
+    }
+
     if (data.side === "BUY") {
       that.buyOrders.push(data);
-      return { orderId: data.orderId };
     } else {
       that.sellOrders.push(data);
-      return { orderId: data.orderId };
     }
+
+    const account = that.accounts.get(data.accId);
+    if (!account) {
+      return { success: false, message: "Account not found." };
+    }
+    delete data.accId; // ASKING TO MAKE accId OPTIONAL IN BuyOrders AND SellOrders TYPE.
+    account.orders.push(data);
+
+    return {
+      success: true,
+      message: "Added order successfully.",
+      orderId: data.orderId,
+    };
   }
 
   fillOrder(data: BuyOrders | SellOrders) {
