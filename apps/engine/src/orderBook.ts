@@ -26,8 +26,9 @@ type CumulativeQuantity = number;
 export class OrderBook {
   buyOrders: BuyOrders[];
   sellOrders: SellOrders[];
-
-  constructor() {
+  market: string;
+  constructor(market: string) {
+    this.market = market;
     this.buyOrders = [];
     this.sellOrders = [];
   }
@@ -64,8 +65,9 @@ export class OrderBook {
         if (sellOrder.limitPrice > data.limitPrice) {
           break;
         }
+        console.log("sellOrder.qty", sellOrder.qty);
+        console.log("buyOrder.qty", data.qty);
         if (sellOrder.qty > data.qty) {
-          sellOrder.qty -= data.qty;
           filledOrder = [
             {
               accId: sellOrder.accId,
@@ -78,7 +80,10 @@ export class OrderBook {
             },
             data,
           ];
+          sellOrder.qty -= data.qty;
+          break;
         } else if (sellOrder.qty < data.qty) {
+          data.qty -= sellOrder.qty;
           filledOrder = [sellOrder];
           that.sellOrders.shift();
         } else {
@@ -105,7 +110,6 @@ export class OrderBook {
           break;
         }
         if (buyOrder.qty > data.qty) {
-          buyOrder.qty -= data.qty;
           filledOrder = [
             {
               accId: buyOrder.accId,
@@ -118,7 +122,10 @@ export class OrderBook {
             },
             data,
           ];
+          buyOrder.qty -= data.qty;
+          break;
         } else if (buyOrder.qty < data.qty) {
+          data.qty -= buyOrder.qty;
           filledOrder = [buyOrder];
           that.sellOrders.shift();
         } else {
