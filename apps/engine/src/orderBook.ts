@@ -51,25 +51,21 @@ export class OrderBook {
 
     if (data.side === "BUY") {
       that.sellOrders.sort(
-        (a: SellOrders, b: SellOrders) => b.limitPrice - a.limitPrice,
+        (a: SellOrders, b: SellOrders) => a.limitPrice - b.limitPrice,
       );
-      for (let i = 0; i < that.sellOrders.length; i++) {
-        const sellOrder = that.sellOrders[i];
+      while (that.sellOrders.length > 0) {
+        const sellOrder = that.sellOrders[0];
         if (!sellOrder) {
-          return { message: "There is no sell orders." };
+          break;
         }
         if (sellOrder.accId === data.accId) {
           continue;
         }
         if (sellOrder.limitPrice > data.limitPrice) {
-          if (filledOrder.length !== 0) {
-            return { message: "Order filled", filledOrder };
-          } else {
-            return { message: "Limit Price is not matching." };
-          }
+          break;
         }
         if (sellOrder.qty > data.qty) {
-          sellOrder.qty - data.qty;
+          sellOrder.qty -= data.qty;
           filledOrder = [
             {
               accId: sellOrder.accId,
@@ -90,27 +86,26 @@ export class OrderBook {
           that.sellOrders.shift();
         }
       }
+      if (filledOrder.length > 0) {
+        return { message: "FILLED", filledOrder };
+      }
     } else {
       that.buyOrders.sort(
-        (a: BuyOrders, b: BuyOrders) => a.limitPrice - b.limitPrice,
+        (a: BuyOrders, b: BuyOrders) => b.limitPrice - a.limitPrice,
       );
-      for (let i = 0; i < that.buyOrders.length; i++) {
-        const buyOrder = that.buyOrders[i];
+      while (that.buyOrders.length > 0) {
+        const buyOrder = that.buyOrders[0];
         if (!buyOrder) {
-          return { message: "There is no sell orders." };
+          break;
         }
         if (buyOrder.accId === data.accId) {
           continue;
         }
         if (buyOrder.limitPrice > data.limitPrice) {
-          if (filledOrder.length !== 0) {
-            return { message: "Order filled", filledOrder };
-          } else {
-            return { message: "Limit Price is not matching." };
-          }
+          break;
         }
         if (buyOrder.qty > data.qty) {
-          buyOrder.qty - data.qty;
+          buyOrder.qty -= data.qty;
           filledOrder = [
             {
               accId: buyOrder.accId,
@@ -130,6 +125,9 @@ export class OrderBook {
           filledOrder = [buyOrder, data];
           that.sellOrders.shift();
         }
+      }
+      if (filledOrder.length > 0) {
+        return { message: "FILLED", filledOrder };
       }
     }
   }
