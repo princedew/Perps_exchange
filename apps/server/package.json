@@ -2,7 +2,7 @@
   "name": "server",
   "version": "1.0.0",
   "description": "",
-  "main": "dist/main.js",
+  "main": "main.ts",
   "scripts": {
     "start": "node --env-file=../../.env dist/main.js",
     "dev": "tsx watch --env-file=../../.env src/main.ts",
