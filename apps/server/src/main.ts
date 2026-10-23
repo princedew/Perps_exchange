@@ -1,6 +1,7 @@
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import { pool } from '@repo/db';
+import router from './router.js';
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -12,7 +13,8 @@ app.get('/health', (req, res) => {
     res.send("server running...");
 });
 
-// Start the server
+app.use("/api", router);
+
 const server = app.listen(PORT, () => {
     console.log(`🔥 Server is running on http://localhost:${PORT}`);
 });
