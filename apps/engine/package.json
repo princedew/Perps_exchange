@@ -9,5 +9,12 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "type": "module"
+  "type": "module",
+  "dependencies": {
+    "sorted-btree": "^2.1.0",
+    "@repo/db": "file:../../packages/db",
+    "@repo/kafka": "file:../../packages/kafka",
+    "@repo/redis": "file:../../packages/redis",
+    "@repo/utils": "file:../../packages/utils"
+  },
 }
