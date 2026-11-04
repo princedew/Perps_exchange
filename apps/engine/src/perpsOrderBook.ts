@@ -4,7 +4,6 @@ import {
   type AccId,
   type Position,
   type PositionId,
-  type MarketType,
 } from "./account.js";
 
 const BTree = sortedBTree.default.default;
@@ -107,23 +106,22 @@ export class PerpsFutureOrderBook {
     this.accounts = accounts;
   }
 
-  fillOrder3(data: Order): FillOrderResult {
-    const balanceResult = this.hasBalance(data);
-
-    if (!balanceResult.success) {
-      return balanceResult;
-    }
-
-    // Closing orders must specify the position they want to close.
-    if (
+  fillOrder(data: Order): FillOrderResult {
+    const isClosingOrder =
       (data.side === "SELL" && data.direction === "LONG") ||
-      (data.side === "BUY" && data.direction === "SHORT")
-    ) {
-      if (data.positionId === undefined) {
-        return {
-          success: false,
-          message: "Position ID is required to close a position.",
-        };
+      (data.side === "BUY" && data.direction === "SHORT");
+
+    if (isClosingOrder) {
+      const closeValidation = this.validateCloseOrder(data);
+
+      if (!closeValidation.success) {
+        return closeValidation;
+      }
+    } else {
+      const balanceResult = this.hasBalance(data);
+
+      if (!balanceResult.success) {
+        return balanceResult;
       }
     }
 
@@ -155,7 +153,6 @@ export class PerpsFutureOrderBook {
         break;
       }
 
-      // Prevent an account from trading against itself.
       if (incomingOrder.accId === bestMatchOrder.accId) {
         return {
           message: "SELF_TRADE_PREVENTED",
@@ -182,22 +179,39 @@ export class PerpsFutureOrderBook {
         qty: matchedQty,
       };
 
-      filledOrder.push(buyerFill, sellerFill);
+      const buyerCloseValidation = this.validateCloseOrder(buyerFill);
+      if (!buyerCloseValidation.success) {
+        return buyerCloseValidation;
+      }
+
+      const sellerCloseValidation = this.validateCloseOrder(sellerFill);
+      if (!sellerCloseValidation.success) {
+        return sellerCloseValidation;
+      }
 
       if (buyerFill.direction === "LONG") {
         this.openLongPositionInAccount(buyerFill, bestPrice);
-      } else if (buyerFill.direction === "SHORT") {
-        this.closeShortPositionInAccount(buyerFill);
+      } else {
+        const closeResult = this.closeShortPositionInAccount(buyerFill);
+        if (!closeResult.success) return closeResult;
       }
 
       if (sellerFill.direction === "LONG") {
-        this.closeLongPositionInAccount(sellerFill);
-      } else if (sellerFill.direction === "SHORT") {
+        const closeResult = this.closeLongPositionInAccount(sellerFill);
+        if (!closeResult.success) return closeResult;
+      } else {
         this.openShortPositionInAccount(sellerFill, bestPrice);
       }
 
+      filledOrder.push(buyerFill, sellerFill);
+
       incomingOrder.qty -= matchedQty;
       bestMatchOrder.qty -= matchedQty;
+      priceLevel.totalQty -= matchedQty;
+
+      if (bestMatchOrder.qty === 0) {
+        priceLevel.head++;
+      }
 
       this.removeFilledOrder(oppositeTree, bestPrice, priceLevel);
     }
@@ -250,19 +264,19 @@ export class PerpsFutureOrderBook {
             : position.takeProfit !== undefined &&
               currentPrice <= position.takeProfit;
 
-        if (stopLossTriggered) {
+        if (stopLossTriggered && position.stopLoss !== undefined) {
           triggeredPositions.push({
             accId,
             position,
             trigger: "STOP_LOSS",
-            triggerPrice: position.stopLoss!,
+            triggerPrice: position.stopLoss,
           });
-        } else if (takeProfitTriggered) {
+        } else if (takeProfitTriggered && position.takeProfit !== undefined) {
           triggeredPositions.push({
             accId,
             position,
             trigger: "TAKE_PROFIT",
-            triggerPrice: position.takeProfit!,
+            triggerPrice: position.takeProfit,
           });
         }
       }
@@ -292,12 +306,12 @@ export class PerpsFutureOrderBook {
     return { buyDepth, sellDepth };
   }
 
+  cancelOrder() {}
+
   //---------------------------
   // HEALPER METHODS
   //---------------------------
 
-  // PROBLEM: WE SHOULD LOOP OVER ACC SPOT AND PERPS ORDER.
-  // CHECK THE USER HAS BALANCE OR NOT.
   private hasBalance(data: Order): BalanceResult {
     const account = this.accounts.get(data.accId);
 
@@ -308,36 +322,53 @@ export class PerpsFutureOrderBook {
       };
     }
 
-    const requiredBalance = (data.qty * data.limitPrice) / data.leverage;
+    const requiredMargin = (data.qty * data.limitPrice) / data.leverage;
 
-    let positionsBalanceTaken = 0;
-
-    for (const [price, priceLevel] of this.buyOrders.entries()) {
-      for (let i = priceLevel.head; i < priceLevel.orders.length; i++) {
-        const order = priceLevel.orders[i];
-
-        if (order?.accId === data.accId) {
-          positionsBalanceTaken +=
-            (order.qty * order.limitPrice) / order.leverage;
-        }
-      }
-    }
-
-    for (const [price, priceLevel] of this.sellOrders.entries()) {
-      for (let i = priceLevel.head; i < priceLevel.orders.length; i++) {
-        const order = priceLevel.orders[i];
-
-        if (order?.accId === data.accId) {
-          positionsBalanceTaken +=
-            (order.qty * order.limitPrice) / order.leverage;
-        }
-      }
-    }
-
-    if (account.balance - positionsBalanceTaken < requiredBalance) {
+    if (account.availableMargin < requiredMargin) {
       return {
         success: false,
-        message: "Insufficient Balance",
+        message: "Insufficient available margin.",
+      };
+    }
+
+    return { success: true };
+  }
+
+  private validateCloseOrder(data: Order): BalanceResult {
+    const isClosingOrder =
+      (data.side === "SELL" && data.direction === "LONG") ||
+      (data.side === "BUY" && data.direction === "SHORT");
+
+    if (!isClosingOrder) {
+      return { success: true };
+    }
+
+    if (data.positionId === undefined) {
+      return {
+        success: false,
+        message: "Position ID is required to close a position.",
+      };
+    }
+
+    const position = this.accounts.getPosition(
+      data.accId,
+      "PERPS",
+      data.positionId,
+    );
+
+    const expectedSide = data.direction;
+
+    if (!position || position.side !== expectedSide) {
+      return {
+        success: false,
+        message: `${expectedSide} position not found.`,
+      };
+    }
+
+    if (data.qty <= 0 || data.qty > position.qty) {
+      return {
+        success: false,
+        message: "Invalid closing quantity.",
       };
     }
 
@@ -345,95 +376,197 @@ export class PerpsFutureOrderBook {
   }
 
   private openLongPositionInAccount(data: Order, executionPrice: Price): void {
-    this.accounts.addPosition(
+    const positionId = data.positionId ?? `${this.market}:${data.orderId}`;
+    const existingPosition = this.accounts.getPosition(
       data.accId,
-      {
-        orderId: data.orderId,
-        side: "LONG",
-        qty: data.qty,
-        entryPrice: executionPrice,
-        limitPrice: data.limitPrice,
-        ...(data.takeProfit !== undefined
-          ? { takeProfit: data.takeProfit }
-          : {}),
-        ...(data.stopLoss !== undefined ? { stopLoss: data.stopLoss } : {}),
-      },
       "PERPS",
+      positionId,
     );
+
+    if (existingPosition && existingPosition.side !== "LONG") {
+      return;
+    }
+
+    const addedMargin = (data.qty * executionPrice) / data.leverage;
+    const newQty = (existingPosition?.qty ?? 0) + data.qty;
+    const newMargin = (existingPosition?.margin ?? 0) + addedMargin;
+
+    const newEntryPrice = existingPosition
+      ? (existingPosition.qty * existingPosition.entryPrice +
+          data.qty * executionPrice) /
+        newQty
+      : executionPrice;
+
+    const position: Position = {
+      positionId,
+      market: this.market,
+      side: "LONG",
+      qty: newQty,
+      entryPrice: newEntryPrice,
+      leverage: (newQty * newEntryPrice) / newMargin,
+      margin: newMargin,
+      unrealizedPnl: existingPosition?.unrealizedPnl ?? 0,
+      liquidationPrice: existingPosition?.liquidationPrice ?? 0,
+      ...(data.takeProfit !== undefined
+        ? { takeProfit: data.takeProfit }
+        : existingPosition?.takeProfit !== undefined
+          ? { takeProfit: existingPosition.takeProfit }
+          : {}),
+      ...(data.stopLoss !== undefined
+        ? { stopLoss: data.stopLoss }
+        : existingPosition?.stopLoss !== undefined
+          ? { stopLoss: existingPosition.stopLoss }
+          : {}),
+    };
+
+    this.accounts.addPosition(data.accId, position, "PERPS");
   }
 
   private openShortPositionInAccount(data: Order, executionPrice: Price): void {
+    const positionId = data.positionId ?? `${this.market}:${data.orderId}`;
+    const existingPosition = this.accounts.getPosition(
+      data.accId,
+      "PERPS",
+      positionId,
+    );
+
+    if (existingPosition && existingPosition.side !== "SHORT") {
+      return;
+    }
+
+    const addedMargin = (data.qty * executionPrice) / data.leverage;
+    const newQty = (existingPosition?.qty ?? 0) + data.qty;
+    const newMargin = (existingPosition?.margin ?? 0) + addedMargin;
+
+    const newEntryPrice = existingPosition
+      ? (existingPosition.qty * existingPosition.entryPrice +
+          data.qty * executionPrice) /
+        newQty
+      : executionPrice;
+
+    const position: Position = {
+      positionId,
+      market: this.market,
+      side: "SHORT",
+      qty: newQty,
+      entryPrice: newEntryPrice,
+      leverage: (newQty * newEntryPrice) / newMargin,
+      margin: newMargin,
+      unrealizedPnl: existingPosition?.unrealizedPnl ?? 0,
+      liquidationPrice: existingPosition?.liquidationPrice ?? 0,
+      ...(data.takeProfit !== undefined
+        ? { takeProfit: data.takeProfit }
+        : existingPosition?.takeProfit !== undefined
+          ? { takeProfit: existingPosition.takeProfit }
+          : {}),
+      ...(data.stopLoss !== undefined
+        ? { stopLoss: data.stopLoss }
+        : existingPosition?.stopLoss !== undefined
+          ? { stopLoss: existingPosition.stopLoss }
+          : {}),
+    };
+
+    this.accounts.addPosition(data.accId, position, "PERPS");
+  }
+
+  private closeLongPositionInAccount(data: Order): BalanceResult {
+    if (data.positionId === undefined) {
+      return {
+        success: false,
+        message: "Position ID is required.",
+      };
+    }
+
+    const position = this.accounts.getPosition(
+      data.accId,
+      "PERPS",
+      data.positionId,
+    );
+
+    if (!position || position.side !== "LONG") {
+      return {
+        success: false,
+        message: "LONG position not found.",
+      };
+    }
+
+    if (data.qty <= 0 || data.qty > position.qty) {
+      return {
+        success: false,
+        message: "Invalid closing quantity.",
+      };
+    }
+
+    const remainingQty = position.qty - data.qty;
+
+    if (remainingQty === 0) {
+      this.accounts.removePosition(data.accId, position.positionId, "PERPS");
+      return { success: true };
+    }
+
+    const remainingMargin = position.margin * (remainingQty / position.qty);
+
     this.accounts.addPosition(
       data.accId,
       {
-        orderId: data.orderId,
-        side: "SHORT",
-        qty: data.qty,
-        entryPrice: executionPrice,
-        limitPrice: data.limitPrice,
-        ...(data.takeProfit !== undefined
-          ? { takeProfit: data.takeProfit }
-          : {}),
-        ...(data.stopLoss !== undefined ? { stopLoss: data.stopLoss } : {}),
+        ...position,
+        qty: remainingQty,
+        margin: remainingMargin,
       },
       "PERPS",
     );
+
+    return { success: true };
   }
 
-  private closeLongPositionInAccount(data: Order): void {
-    const positions = this.accounts.getPositions(data.accId, "PERPS");
+  private closeShortPositionInAccount(data: Order): BalanceResult {
+    if (data.positionId === undefined) {
+      return {
+        success: false,
+        message: "Position ID is required.",
+      };
+    }
 
-    if (!positions || data.positionId === undefined) return;
-
-    const position = Array.from(positions).find(
-      (position) =>
-        position.side === "LONG" && position.orderId === data.positionId,
+    const position = this.accounts.getPosition(
+      data.accId,
+      "PERPS",
+      data.positionId,
     );
 
-    if (!position) return;
-
-    const filledQty = Math.min(position.qty, data.qty);
-
-    this.accounts.removePosition(data.accId, position, "PERPS");
-
-    if (position.qty > filledQty) {
-      this.accounts.addPosition(
-        data.accId,
-        {
-          ...position,
-          qty: position.qty - filledQty,
-        },
-        "PERPS",
-      );
+    if (!position || position.side !== "SHORT") {
+      return {
+        success: false,
+        message: "SHORT position not found.",
+      };
     }
-  }
 
-  private closeShortPositionInAccount(data: Order): void {
-    const positions = this.accounts.getPositions(data.accId, "PERPS");
+    if (data.qty <= 0 || data.qty > position.qty) {
+      return {
+        success: false,
+        message: "Invalid closing quantity.",
+      };
+    }
 
-    if (!positions || data.positionId === undefined) return;
+    const remainingQty = position.qty - data.qty;
 
-    const position = Array.from(positions).find(
-      (position) =>
-        position.side === "SHORT" && position.orderId === data.positionId,
+    if (remainingQty === 0) {
+      this.accounts.removePosition(data.accId, position.positionId, "PERPS");
+      return { success: true };
+    }
+
+    const remainingMargin = position.margin * (remainingQty / position.qty);
+
+    this.accounts.addPosition(
+      data.accId,
+      {
+        ...position,
+        qty: remainingQty,
+        margin: remainingMargin,
+      },
+      "PERPS",
     );
 
-    if (!position) return;
-
-    const filledQty = Math.min(position.qty, data.qty);
-
-    this.accounts.removePosition(data.accId, position, "PERPS");
-
-    if (position.qty > filledQty) {
-      this.accounts.addPosition(
-        data.accId,
-        {
-          ...position,
-          qty: position.qty - filledQty,
-        },
-        "PERPS",
-      );
-    }
+    return { success: true };
   }
 
   // ADDING ORDER IN TREE WHICH DON'T MATCH INSTANTLY.
