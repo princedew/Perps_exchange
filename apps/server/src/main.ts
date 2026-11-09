@@ -1,7 +1,9 @@
-import express from 'express';
-import cookieParser from 'cookie-parser';
-import { pool } from '@repo/db';
-import router from './router.js';
+import express from "express";
+import cookieParser from "cookie-parser";
+import { pool } from "@repo/db";
+import router from "./router.js";
+import { revokeHold } from "./handlers/orderHandlers.js";
+import { errorHandler } from "@repo/utils";
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -9,25 +11,27 @@ const PORT = process.env.PORT || 5000;
 app.use(express.json());
 app.use(cookieParser());
 
-app.get('/health', (req, res) => {
-    res.send("server running...");
+app.get("/health", (req, res) => {
+  res.send("server running...");
 });
+
+await revokeHold();
 
 app.use("/api", router);
 
+app.use(errorHandler);
+
 const server = app.listen(PORT, () => {
-    console.log(`🔥 Server is running on http://localhost:${PORT}`);
+  console.log(`🔥 Server is running on http://localhost:${PORT}`);
 });
 
 pool.on("error", (error: Error): void => {
   console.error("DB POOL ERR:", error);
 });
 
-
-process.on("SIGTERM", () => { 
-    server.on("close", async () => { 
-        await pool.end();
-        process.exit(1);
-    })
- })
-    
+process.on("SIGTERM", () => {
+  server.on("close", async () => {
+    await pool.end();
+    process.exit(1);
+  });
+});

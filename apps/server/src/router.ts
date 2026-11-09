@@ -3,12 +3,12 @@ import {
   createOrderHandler,
   updateOrderHandler,
   closeOrderHandler,
-} from "./handlers/order.js";
+} from "./handlers/orderHandlers.js";
 import {
   getPositionsHandler,
   getTransactionsHandler,
   getHoldingsHandler,
-} from "./handlers/getHandlers.js";
+} from "./handlers/accountHandler.js";
 import { auth, createOrderSchema, validate } from "@repo/utils";
 
 const router = Router();
