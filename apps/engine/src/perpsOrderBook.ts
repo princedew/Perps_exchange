@@ -87,6 +87,13 @@ type Depth = {
   sellDepth: Record<string, Quantity>;
 };
 
+type CancelOrderResult =
+  | { success: true; message: "ORDER_CANCELLED" }
+  | {
+      success: false;
+      message: "ORDER_NOT_FOUND" | "ORDER_ALREADY_FILLED";
+    };
+
 export class PerpsFutureOrderBook {
   market: MarketId;
   currentPrice: Price;
@@ -145,12 +152,17 @@ export class PerpsFutureOrderBook {
       const bestMatchOrder = priceLevel.orders[priceLevel.head];
       if (!bestMatchOrder) break;
 
-      if (
-        incomingOrder.side === "BUY"
-          ? incomingOrder.limitPrice < bestPrice
-          : incomingOrder.limitPrice > bestPrice
+      if (incomingOrder.side === "BUY" && incomingOrder.direction === "LONG") {
+        if (incomingOrder.limitPrice < Number(bestPrice)) {
+          break;
+        }
+      } else if (
+        incomingOrder.side === "BUY" &&
+        incomingOrder.direction === "LONG"
       ) {
-        break;
+        if (incomingOrder.limitPrice > Number(bestPrice)) {
+          break;
+        }
       }
 
       if (incomingOrder.accId === bestMatchOrder.accId) {
@@ -162,6 +174,13 @@ export class PerpsFutureOrderBook {
       }
 
       const matchedQty = Math.min(incomingOrder.qty, bestMatchOrder.qty);
+
+      this.currentPrice = Number(bestPrice) || this.currentPrice;
+
+      this.accounts.updatePositionsUnRealizedProfitAfterOrderFill(
+        this.market,
+        this.currentPrice,
+      );
 
       const buyerOrder: Order =
         incomingOrder.side === "BUY" ? incomingOrder : bestMatchOrder;
@@ -192,12 +211,18 @@ export class PerpsFutureOrderBook {
       if (buyerFill.direction === "LONG") {
         this.openLongPositionInAccount(buyerFill, bestPrice);
       } else {
-        const closeResult = this.closeShortPositionInAccount(buyerFill);
+        const closeResult = this.closeShortPositionInAccount(
+          buyerFill,
+          this.currentPrice,
+        );
         if (!closeResult.success) return closeResult;
       }
 
       if (sellerFill.direction === "LONG") {
-        const closeResult = this.closeLongPositionInAccount(sellerFill);
+        const closeResult = this.closeLongPositionInAccount(
+          sellerFill,
+          this.currentPrice,
+        );
         if (!closeResult.success) return closeResult;
       } else {
         this.openShortPositionInAccount(sellerFill, bestPrice);
@@ -306,7 +331,92 @@ export class PerpsFutureOrderBook {
     return { buyDepth, sellDepth };
   }
 
-  cancelOrder() {}
+  modifyOrderInTreeAndAccount(
+    accId: AccId,
+    positionId: PositionId,
+    tp?: Price,
+    sl?: Price,
+  ): boolean {
+    const trees = [this.buyOrders, this.sellOrders];
+    let found = false;
+
+    for (const tree of trees) {
+      for (const [price, level] of Array.from(tree.entries())) {
+        for (let i = level.head; i < level.orders.length; i++) {
+          const order = level.orders[i];
+
+          if (order.accId !== accId || order.positionId !== positionId) {
+            continue;
+          }
+
+          if (tp !== undefined) order.takeProfit = tp;
+          if (sl !== undefined) order.stopLoss = sl;
+
+          tree.set(price, level);
+          found = true;
+        }
+      }
+    }
+
+    const position = this.accounts.getPosition(accId, "PERPS", positionId);
+
+    if (position && position.market === this.market) {
+      this.accounts.updatePosition(accId, positionId, tp, sl);
+      found = true;
+    }
+
+    return found;
+  }
+
+  cancelUnFilledOrderFromTree(
+    accId: AccId,
+    orderId: OrderId,
+    positionId?: PositionId,
+  ): CancelOrderResult {
+    const trees = [this.buyOrders, this.sellOrders];
+
+    for (const tree of trees) {
+      for (const [price, level] of Array.from(tree.entries())) {
+        for (let i = level.head; i < level.orders.length; i++) {
+          const order = level.orders[i];
+
+          if (order.accId !== accId || order.orderId !== orderId) {
+            continue;
+          }
+
+          level.totalQty -= order.qty;
+          level.orders.splice(i, 1);
+
+          this.removeFilledOrder(tree, price, level);
+
+          return {
+            success: true,
+            message: "ORDER_CANCELLED",
+          };
+        }
+      }
+    }
+
+    const targetPositionId = positionId ?? `${this.market}:${orderId}`;
+
+    const position = this.accounts.getPosition(
+      accId,
+      "PERPS",
+      targetPositionId,
+    );
+
+    if (position && position.market === this.market) {
+      return {
+        success: false,
+        message: "ORDER_ALREADY_FILLED",
+      };
+    }
+
+    return {
+      success: false,
+      message: "ORDER_NOT_FOUND",
+    };
+  }
 
   //---------------------------
   // HEALPER METHODS
@@ -376,100 +486,45 @@ export class PerpsFutureOrderBook {
   }
 
   private openLongPositionInAccount(data: Order, executionPrice: Price): void {
-    const positionId = data.positionId ?? `${this.market}:${data.orderId}`;
-    const existingPosition = this.accounts.getPosition(
-      data.accId,
-      "PERPS",
-      positionId,
-    );
-
-    if (existingPosition && existingPosition.side !== "LONG") {
-      return;
-    }
-
-    const addedMargin = (data.qty * executionPrice) / data.leverage;
-    const newQty = (existingPosition?.qty ?? 0) + data.qty;
-    const newMargin = (existingPosition?.margin ?? 0) + addedMargin;
-
-    const newEntryPrice = existingPosition
-      ? (existingPosition.qty * existingPosition.entryPrice +
-          data.qty * executionPrice) /
-        newQty
-      : executionPrice;
-
     const position: Position = {
-      positionId,
+      positionId: data.positionId,
       market: this.market,
       side: "LONG",
-      qty: newQty,
-      entryPrice: newEntryPrice,
-      leverage: (newQty * newEntryPrice) / newMargin,
-      margin: newMargin,
-      unrealizedPnl: existingPosition?.unrealizedPnl ?? 0,
-      liquidationPrice: existingPosition?.liquidationPrice ?? 0,
-      ...(data.takeProfit !== undefined
-        ? { takeProfit: data.takeProfit }
-        : existingPosition?.takeProfit !== undefined
-          ? { takeProfit: existingPosition.takeProfit }
-          : {}),
-      ...(data.stopLoss !== undefined
-        ? { stopLoss: data.stopLoss }
-        : existingPosition?.stopLoss !== undefined
-          ? { stopLoss: existingPosition.stopLoss }
-          : {}),
+      qty: data.qty,
+      entryPrice: executionPrice,
+      leverage: data.leverage,
+      margin: (data.qty * executionPrice) / data.leverage,
+      unrealizedPnl: 0,
+      liquidationPrice: 0,
+      ...(data.takeProfit !== undefined ? { takeProfit: data.takeProfit } : {}),
+      ...(data.stopLoss !== undefined ? { stopLoss: data.stopLoss } : {}),
     };
 
     this.accounts.addPosition(data.accId, position, "PERPS");
   }
 
   private openShortPositionInAccount(data: Order, executionPrice: Price): void {
-    const positionId = data.positionId ?? `${this.market}:${data.orderId}`;
-    const existingPosition = this.accounts.getPosition(
-      data.accId,
-      "PERPS",
-      positionId,
-    );
-
-    if (existingPosition && existingPosition.side !== "SHORT") {
-      return;
-    }
-
-    const addedMargin = (data.qty * executionPrice) / data.leverage;
-    const newQty = (existingPosition?.qty ?? 0) + data.qty;
-    const newMargin = (existingPosition?.margin ?? 0) + addedMargin;
-
-    const newEntryPrice = existingPosition
-      ? (existingPosition.qty * existingPosition.entryPrice +
-          data.qty * executionPrice) /
-        newQty
-      : executionPrice;
-
     const position: Position = {
-      positionId,
+      positionId: data.positionId,
       market: this.market,
       side: "SHORT",
-      qty: newQty,
-      entryPrice: newEntryPrice,
-      leverage: (newQty * newEntryPrice) / newMargin,
-      margin: newMargin,
-      unrealizedPnl: existingPosition?.unrealizedPnl ?? 0,
-      liquidationPrice: existingPosition?.liquidationPrice ?? 0,
-      ...(data.takeProfit !== undefined
-        ? { takeProfit: data.takeProfit }
-        : existingPosition?.takeProfit !== undefined
-          ? { takeProfit: existingPosition.takeProfit }
-          : {}),
-      ...(data.stopLoss !== undefined
-        ? { stopLoss: data.stopLoss }
-        : existingPosition?.stopLoss !== undefined
-          ? { stopLoss: existingPosition.stopLoss }
-          : {}),
+      qty: data.qty,
+      entryPrice: executionPrice,
+      leverage: data.leverage,
+      margin: (data.qty * executionPrice) / data.leverage,
+      unrealizedPnl: 0,
+      liquidationPrice: 0,
+      ...(data.takeProfit !== undefined ? { takeProfit: data.takeProfit } : {}),
+      ...(data.stopLoss !== undefined ? { stopLoss: data.stopLoss } : {}),
     };
 
     this.accounts.addPosition(data.accId, position, "PERPS");
   }
 
-  private closeLongPositionInAccount(data: Order): BalanceResult {
+  private closeLongPositionInAccount(
+    data: Order,
+    closingPrice: Price,
+  ): BalanceResult {
     if (data.positionId === undefined) {
       return {
         success: false,
@@ -500,7 +555,12 @@ export class PerpsFutureOrderBook {
     const remainingQty = position.qty - data.qty;
 
     if (remainingQty === 0) {
-      this.accounts.removePosition(data.accId, position.positionId, "PERPS");
+      this.accounts.removePosition(
+        data.accId,
+        position.positionId,
+        "PERPS",
+        closingPrice,
+      );
       return { success: true };
     }
 
@@ -519,7 +579,10 @@ export class PerpsFutureOrderBook {
     return { success: true };
   }
 
-  private closeShortPositionInAccount(data: Order): BalanceResult {
+  private closeShortPositionInAccount(
+    data: Order,
+    closingPrice: Price,
+  ): BalanceResult {
     if (data.positionId === undefined) {
       return {
         success: false,
@@ -550,7 +613,12 @@ export class PerpsFutureOrderBook {
     const remainingQty = position.qty - data.qty;
 
     if (remainingQty === 0) {
-      this.accounts.removePosition(data.accId, position.positionId, "PERPS");
+      this.accounts.removePosition(
+        data.accId,
+        position.positionId,
+        "PERPS",
+        closingPrice,
+      );
       return { success: true };
     }
 

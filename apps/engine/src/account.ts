@@ -21,9 +21,9 @@ export type Position = {
   entryPrice: Price;
   qty: Quantity;
   leverage: Leverage;
-  margin: UsedMargin;
+  margin: UsedMargin; // [USES]: it is required to calculate used margin.
   unrealizedPnl: number;
-  liquidationPrice: LiqPrice;
+  liquidationPrice: LiqPrice; // remove
   takeProfit?: Price;
   stopLoss?: Price;
 };
@@ -33,6 +33,9 @@ export type Account = {
   equity: Equity;
   usedMargin: UsedMargin;
   availableMargin: AvailableMargin;
+  realizedPnl: 0;
+  unrealizedPnl: 0;
+  totalProfit: 0;
   positions: Map<MarketType, Map<PositionId, Position>>;
 };
 
@@ -64,21 +67,54 @@ export class Accounts {
     return account;
   }
 
-  entries(): IterableIterator<[AccId, Account]> {
+  entries(): [AccId, Account][] {
     return this.accounts.entries();
   }
 
   addBalance(accId: AccId, amount: QuoteBalance): void {
-    this.updateBalance(accId, amount);
-  }
-
-  updateBalance(accId: AccId, amount: QuoteBalance): void {
     const account = this.ensure(accId);
 
     account.balance += amount;
     account.equity += amount;
-    account.availableMargin = account.equity - account.usedMargin;
+    account.availableMargin += amount;
+    // account.availableMargin = account.equity - account.usedMargin;
+    // calculateAvailableMargin();
   }
+
+  //   updateUnrealizedPnl(
+  //     accId: AccId,
+  //     market: MarketType,
+  //     positionId: PositionId,
+  //     pnl: number,
+  //   ): void {
+  //     const account = this.get(accId);
+  //     if (!account) return;
+
+  //     const positions = account.positions.get(market);
+  //     if (!positions) return;
+
+  //     const position = positions.get(positionId);
+  //     if (!position) return;
+
+  //     account.unrealizedPnl -= position.unrealizedPnl;
+
+  //     const updatedPosition: Position = {
+  //       ...position,
+  //       unrealizedPnl: pnl,
+  //     };
+
+  //     positions.set(positionId, updatedPosition);
+
+  //     account.unrealizedPnl += pnl;
+  //   }
+
+  //   updateRealizedPnl(accId: AccId, pnl: number): void {
+  //     const account = this.get(accId);
+  //     if (!account) return;
+
+  //     account.realizedPnl += pnl;
+  //     account.balance += pnl;
+  //   }
 
   getPositions(
     accId: AccId,
@@ -101,11 +137,11 @@ export class Accounts {
 
     if (!positions) return;
 
-    const existingPosition = positions.get(position.positionId);
+    // const existingPosition = positions.get(position.positionId);
 
-    if (existingPosition) {
-      account.usedMargin -= existingPosition.margin;
-    }
+    // if (existingPosition) {
+    //   account.usedMargin -= existingPosition.margin;
+    // }
 
     positions.set(position.positionId, position);
 
@@ -113,10 +149,33 @@ export class Accounts {
     account.availableMargin = account.equity - account.usedMargin;
   }
 
+  updatePosition(
+    accId: AccId,
+    positionId: PositionId,
+    tp?: Price,
+    sl?: Price,
+  ): void {
+    const account = this.get(accId);
+    if (!account) return;
+
+    const positions = account.positions.get("PERPS");
+    if (!positions) return;
+
+    const position = positions.get(positionId);
+    if (!position) return;
+
+    positions.set(positionId, {
+      ...position,
+      ...(tp !== undefined ? { takeProfit: tp } : {}),
+      ...(sl !== undefined ? { stopLoss: sl } : {}),
+    });
+  }
+
   removePosition(
     accId: AccId,
     positionId: PositionId,
     market: MarketType,
+    closingPrice:Price
   ): void {
     const account = this.get(accId);
     if (!account) return;
@@ -128,8 +187,28 @@ export class Accounts {
     if (!position) return;
 
     account.usedMargin -= position.margin;
+    position. (position.entryPrice - closingPrice)
     positions.delete(positionId);
 
     account.availableMargin = account.equity - account.usedMargin;
+  }
+
+  // THIS METHOD WILL UPDATE THE PNL OF POSITIONS AFTER THE CHANGE OF CURRENT-PRICE.
+  updatePositionsUnRealizedProfitAfterOrderFill(
+    market: string,
+    currentPrice: number,
+  ) {
+    for (const [accId, account] of this.accounts.entries()) {
+      const perpsPositions = account.positions.get("PERPS");
+      if (!perpsPositions) continue;
+      for (const [positionId, position] of perpsPositions?.entries()) {
+        if (position.market !== market) continue;
+        position.unrealizedPnl =
+          position.side === "SHORT"
+            ? (position.entryPrice - currentPrice) * position.qty
+            : (currentPrice - position.entryPrice) * position.qty;
+        account.equity += position.unrealizedPnl;
+      }
+    }
   }
 }

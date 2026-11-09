@@ -1,3 +1,8 @@
+// engine/src/main.ts
+
+// [TASK-1] In these 4 cases, i made a mistake instead of sending it to the Notification service i had send it to the realtime service, your job is to fix it.
+// [TASK-2] After the fillOrder the price changes if i m getting this right then u send message to realtime using sendKafka fn in which u are going send example: {market:"BTC", currentPrice:5512124}
+
 import { kafka, KAFKA_MSG_TYPE, KAFKA_TOPICS, sendToKafka } from "@repo/kafka";
 import { KAFKA_CONSUMER_GRP } from "@repo/kafka/src/config.js";
 import { orderSchema } from "@repo/utils";
@@ -9,6 +14,34 @@ const orderBook = new Map<string, PerpsFutureOrderBook>();
 export const consumer = kafka.consumer({
   groupId: KAFKA_CONSUMER_GRP.MATCHING_ENGINE_CONSUMER_GRP,
 });
+
+async function publishMarketPrice(
+  market: string,
+  fillResult: ReturnType<PerpsFutureOrderBook["fillOrder"]>,
+  key: string,
+): Promise<void> {
+  // fillOrder must expose the actual execution price.
+  // Do not use the incoming order's limitPrice as a substitute.
+  const executionPrice =
+    "executionPrice" in fillResult &&
+    typeof fillResult.executionPrice === "number"
+      ? fillResult.executionPrice
+      : undefined;
+
+  if (executionPrice === undefined) return;
+
+  await sendToKafka(
+    KAFKA_TOPICS.REALTIME as keyof typeof KAFKA_TOPICS,
+    KAFKA_MSG_TYPE.MARKET_PRICE_UPDATE as keyof typeof KAFKA_MSG_TYPE,
+    1,
+    1,
+    key,
+    {
+      market,
+      currentPrice: executionPrice,
+    },
+  );
+}
 
 async function runConsumer(): Promise<void> {
   const accounts = createAccounts();
@@ -30,6 +63,13 @@ async function runConsumer(): Promise<void> {
         input: unknown;
       };
 
+      const key = message.key?.toString();
+
+      if (!key || typeof key !== "string") {
+        console.log("Invalid string.");
+        return;
+      }
+
       try {
         payload = JSON.parse(message.value.toString());
       } catch (error: unknown) {
@@ -37,103 +77,205 @@ async function runConsumer(): Promise<void> {
         return;
       }
 
-      const { type, input } = payload; // input:{reqIdOfReqHold, market, order};
-
-      if (typeof input !== "object") {
+      if (typeof payload !== "object" || payload === null) {
+        console.error("Invalid Kafka payload");
         return;
       }
 
-      if (!input.market || typeof input.market !== "string") {
-        console.error("Invalid market:", input.market);
+      const { type, input } = payload;
+
+      if (typeof type !== "string" || !type) {
+        console.error("Invalid Kafka message type:", type);
         return;
       }
 
-      let obObj = orderBook.get(input.market);
+      if (typeof input !== "object" || input === null || Array.isArray(input)) {
+        console.error("Invalid Kafka input:", input);
+        return;
+      }
+
+      const { market, order } = input;
+
+      if (typeof market !== "string" || !market.trim()) {
+        console.error("Invalid market:", market);
+        return;
+      }
+
+      if (typeof order !== "object" || order === null || Array.isArray(order)) {
+        console.error("Invalid order:", order);
+        return;
+      }
+
+      let obObj = orderBook.get(market);
 
       if (!obObj) {
-        obObj = new PerpsFutureOrderBook(input.market, accounts);
-        orderBook.set(input.market, obObj);
+        obObj = new PerpsFutureOrderBook(market, accounts);
+        orderBook.set(market, obObj);
       }
 
       switch (type) {
-        case "CREATE_ORDER": {
-          const result = orderSchema.safeParse(input);
+        // ------------------------
+        // CASE 1
+        // ------------------------
+        case KAFKA_MSG_TYPE.CREATE: {
+          const result = orderSchema.safeParse(input.order);
 
           if (!result.success) {
             console.error("Invalid create order:", result.error.issues);
             return;
           }
 
-          const fillResult = obObj.fillOrder(result.data);
+          const order = result.data;
+          const fillResult = obObj.fillOrder(order);
 
           await sendToKafka(
             KAFKA_TOPICS.MATCHING_ENGINE_RESPONSE,
             KAFKA_MSG_TYPE.CREATE_RESPONSE,
             1,
             1,
-            message.key, // req id key for the req hold in server.
+            key,
             { fillResult },
           );
+
+          // Notification service
+          await sendToKafka(
+            KAFKA_TOPICS.NOTIFICATION,
+            KAFKA_MSG_TYPE.NOTIFY_CREATE,
+            1,
+            1,
+            key,
+            {
+              accId: order.accId,
+              market,
+              orderId: order.orderId,
+              positionId: order.positionId,
+              side: order.side,
+              direction: order.direction,
+              status: fillResult.message,
+              success:
+                !("success" in fillResult) &&
+                fillResult.message !== "SELF_TRADE_PREVENTED",
+            },
+          );
+
+          // Market price update (only if an execution occurred)
+          await publishMarketPrice(market, fillResult, key);
+
           console.log("Order created:", fillResult);
           break;
         }
 
-        case "CLOSE_ORDER": {
-          const result = orderSchema.safeParse(input);
+        // ------------------------
+        // CASE 2
+        // ------------------------
+        case KAFKA_MSG_TYPE.CLOSE: {
+          const result = orderSchema.safeParse(input.order);
 
           if (!result.success) {
             console.error("Invalid close order:", result.error.issues);
             return;
           }
 
-          const fillResult = obObj.fillOrder(result.data);
+          const order = result.data;
+          const fillResult = obObj.fillOrder(order);
 
           await sendToKafka(
             KAFKA_TOPICS.MATCHING_ENGINE_RESPONSE,
             KAFKA_MSG_TYPE.CLOSE_RESPONSE,
             1,
             1,
-            message.key,
+            key,
             { fillResult },
           );
+
+          // Notification service
+          await sendToKafka(
+            KAFKA_TOPICS.NOTIFICATION,
+            KAFKA_MSG_TYPE.NOTIFY_CLOSE,
+            1,
+            1,
+            key,
+            {
+              accId: order.accId,
+              market,
+              orderId: order.orderId,
+              positionId: order.positionId,
+              side: order.side,
+              direction: order.direction,
+              status: fillResult.message,
+              success:
+                !("success" in fillResult) &&
+                fillResult.message !== "SELF_TRADE_PREVENTED",
+            },
+          );
+
+          // Market price update (only if an execution occurred)
+          await publishMarketPrice(market, fillResult, key);
+
           console.log("Position close processed:", fillResult);
           break;
         }
 
-        // we have to create a upppdateOrder method.
-        // case "MODIFY_ORDER": {
-        //   const result = orderSchema.safeParse(input);
+        // ------------------------
+        // CASE 3
+        // ------------------------
+        case KAFKA_MSG_TYPE.MODIFY: {
+          const result = orderSchema.safeParse(input.order);
 
-        //   if (!result.success) {
-        //     console.error("Invalid modify order:", result.error.issues);
-        //     return;
-        //   }
+          if (!result.success) {
+            console.error("Invalid modify order:", result.error.issues);
+            return;
+          }
 
-        //   const order = result.data;
+          const order = result.data;
 
-        //   const cancelled = obObj.cancelOrder(order.accId, order.orderId);
+          const modified = obObj.modifyOrderInTreeAndAccount(
+            order.accId,
+            order.positionId,
+            order.takeProfit,
+            order.stopLoss,
+          );
 
-        //   if (!cancelled) {
-        //     console.error("Order not found for modification:", order.orderId);
-        //     return;
-        //   }
+          await sendToKafka(
+            KAFKA_TOPICS.MATCHING_ENGINE_RESPONSE,
+            KAFKA_MSG_TYPE.MODIFY_RESPONSE,
+            1,
+            1,
+            key,
+            {
+              success: modified,
+              message: modified ? "ORDER_MODIFIED" : "ORDER_NOT_FOUND",
+              positionId: order.positionId,
+            },
+          );
 
-        //   const fillResult = obObj.fillOrder(order);
+          // Notification service
+          await sendToKafka(
+            KAFKA_TOPICS.NOTIFICATION,
+            KAFKA_MSG_TYPE.NOTIFY_MODIFY,
+            1,
+            1,
+            key,
+            {
+              accId: order.accId,
+              market,
+              positionId: order.positionId,
+              takeProfit: order.takeProfit,
+              stopLoss: order.stopLoss,
+              success: modified,
+              message: modified ? "ORDER_MODIFIED" : "ORDER_NOT_FOUND",
+            },
+          );
 
-        //   await sendToKafka(
-        //     KAFKA_TOPICS.MATCHING_ENGINE_RESPONSE,
-        //     KAFKA_MSG_TYPE.MODIFY_RESPONSE,
-        //     1,
-        //     1,
-        //     message.key,
-        //     { fillResult },
-        //   );
-        //   console.log("Order modified:", fillResult);
-        //   break;
-        // }
+          console.log("Order modified:", order.positionId);
+          break;
+        }
 
-        case "CANCLE_ORDER": {
-          const result = orderSchema.safeParse(input);
+        // ------------------------
+        // CASE 4
+        // ------------------------
+        case KAFKA_MSG_TYPE.CANCEL: {
+          const result = orderSchema.safeParse(input.order);
 
           if (!result.success) {
             console.error("Invalid cancel order:", result.error.issues);
@@ -142,20 +284,42 @@ async function runConsumer(): Promise<void> {
 
           const order = result.data;
 
-          const cancelled = obObj.cancelOrder(order.accId, order.orderId);
+          const cancelled = obObj.cancelUnFilledOrderFromTree(
+            order.accId,
+            order.orderId,
+            order.positionId,
+          );
 
-          if (!cancelled) {
-            console.error("Order not found:", order.orderId);
-            return;
-          }
           await sendToKafka(
             KAFKA_TOPICS.MATCHING_ENGINE_RESPONSE,
-            KAFKA_MSG_TYPE.MODIFY_RESPONSE,
+            KAFKA_MSG_TYPE.CANCEL_RESPONSE,
             1,
             1,
-            message.key,
-            { orderId: order.orderId },
+            key,
+            {
+              orderId: order.orderId,
+              success: cancelled.success,
+              message: cancelled.message,
+            },
           );
+
+          // Notification service
+          await sendToKafka(
+            KAFKA_TOPICS.NOTIFICATION,
+            KAFKA_MSG_TYPE.NOTIFY_CANCEL,
+            1,
+            1,
+            key,
+            {
+              accId: order.accId,
+              market,
+              orderId: order.orderId,
+              positionId: order.positionId,
+              success: cancelled.success,
+              message: cancelled.message,
+            },
+          );
+
           console.log("Order cancelled:", order.orderId);
           break;
         }
