@@ -3,9 +3,10 @@ import { KAFKA_MSG_TYPE, KAFKA_TOPICS, sendToKafka } from "@repo/kafka";
 import { redis } from "@repo/redis";
 import type { Request, Response } from "express";
 import { consumer } from "../consumer.js";
-import { createPendingRequest, rejectPendingRequest } from "../utils/pendingRequest.js";
-
-
+import {
+  createPendingRequest,
+  rejectPendingRequest,
+} from "../utils/pendingRequest.js";
 
 export async function createOrderHandler(
   req: Request,
@@ -27,10 +28,7 @@ export async function createOrderHandler(
   const reqId = crypto.randomUUID();
 
   // 1. Register the pending request first.
-  const filledQuantityPromise = createPendingRequest(
-    reqId,
-    Number(quantity),
-  );
+  const filledQuantityPromise = createPendingRequest(reqId, Number(quantity));
 
   try {
     // 2. Send order to Matching Engine.
@@ -64,8 +62,11 @@ export async function createOrderHandler(
 
   const filledQty = await filledQuantityPromise;
 
-  // 4. Continue with your database operations here.
-  // Save the completed order using your existing schema.
+  // db atomic transaction
+  // add transaction
+  // add order
+  // add position
+  // add trade
 
   res.status(201).json({
     success: true,
@@ -76,17 +77,6 @@ export async function createOrderHandler(
     },
   });
 }
-
-
-
-
-
-
-
-
-
-
-
 
 export async function updateOrderHandler(req: Request, res: Response) {}
 export async function closeOrderHandler(req: Request, res: Response) {}
