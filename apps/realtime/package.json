@@ -1,0 +1,19 @@
+{
+  "name": "realtime",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@repo/db": "file:../../packages/db",
+    "@repo/kafka": "file:../../packages/kafka",
+    "@repo/redis": "file:../../packages/redis",
+    "@repo/utils": "file:../../packages/utils"
+  }
+}
