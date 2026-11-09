@@ -1,2 +1,2 @@
-export { auth, validate } from "./middleware";
-export { createOrderSchema } from "./schema";
+export { auth, validate, errorHandler } from "./middleware";
+export { createOrderSchema, orderSchema } from "./schema";
